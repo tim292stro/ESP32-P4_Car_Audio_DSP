@@ -119,7 +119,7 @@ The layout below defines a 32-bit aligned communication register structure runni
 
 ## 5. C++ Implementation Source - Core 0 Infrastructure
 
-### `ESP32P4_AudioProcessor_Core0.hpp` (Part 1)
+### `ESP32P4_AudioProcessor_Core0.hpp`
 ```cpp
 #pragma once
 #include <cmath>
@@ -186,10 +186,7 @@ struct CompleteProcessorPayload {
     float channelPeakOutputs = {0.0f};
     uint32_t stickyClipFlags = 0;
 };
-```
 
-### `ESP32P4_AudioProcessor_Core0.hpp` (Part 2)
-```cpp
 inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels, int numSamples,
                                          float** inputChannels, int numInputs,
                                          CompleteProcessorPayload& controls,
@@ -292,8 +289,14 @@ inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels
         localPeaks = std::max(localPeaks, std::fabs(sampleL)); localPeaks = std::max(localPeaks, std::fabs(sampleR));
         localPeaks = std::max(localPeaks, std::fabs(hpfOutL)); localPeaks = std::max(localPeaks, std::fabs(hpfOutR));
         auto inline_clamp = [](float val) { return std::max(-1.0f, std::min(1.0f, val)); };
-        outputChannels[s] = inline_clamp(hpfOutL * finalGlobalGainMultiplier);
-        outputChannels[s] = inline_clamp(hpfOutR * finalGlobalGainMultiplier);
+        // Explicit multi-channel array pointer streaming (0 = Primary Left, 1 = Primary Right)
+        outputChannels[0][s] = inline_clamp(hpfOutL * finalGlobalGainMultiplier);
+        outputChannels[1][s] = inline_clamp(hpfOutR * finalGlobalGainMultiplier);
+
+        // Explicitly route your low-frequency sub-lines to the target TDM slots (e.g., Channels 4 and 5)
+        outputChannels[4][s] = inline_clamp(lpfOutL * finalGlobalGainMultiplier);
+        outputChannels[5][s] = inline_clamp(lpfOutR * finalGlobalGainMultiplier);
+
     }
 
     for (int ch = 0; ch < 4; ++ch) { if (localPeaks[ch] > controls.channelPeakOutputs[ch]) { controls.channelPeakOutputs[ch] = localPeaks[ch]; } }
