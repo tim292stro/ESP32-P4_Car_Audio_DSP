@@ -402,6 +402,457 @@ private:
 };
 ```
 
+### `ESP32P4_AudioProcessor_Core1_Decimator.hpp`
+```cpp
+#pragma once
+#include <cmath>
+#include <algorithm>
+#include <cstdint>
+
+class Core1Decimator {
+public:
+    // Cascaded 8x downsamplers (8 * 8 = 64x decimation)
+    // 192kHz -> 24kHz -> 3kHz
+    float stage1_coeffs[5] = {0.0f};
+    float stage2_coeffs[5] = {0.0f};
+    
+    float s1_x[2] = {0.0f}, s1_y[2] = {0.0f};
+    float s2_x[2] = {0.0f}, s2_y[2] = {0.0f};
+
+    void init() {
+        // Stage 1: 24kHz Lowpass cutoff at 192kHz sample rate
+        computeBiquadLPF(192000.0f, 12000.0f, stage1_coeffs);
+        // Stage 2: 3kHz Lowpass cutoff at 24kHz sample rate
+        computeBiquadLPF(24000.0f, 1500.0f, stage2_coeffs);
+    }
+
+    inline void processSample(float input, float& output, bool& valid3kHz) {
+        valid3kHz = false;
+        float out1 = 0.0f;
+        
+        // Run first filter stage
+        processStage(input, out1, stage1_coeffs, s1_x, s1_y);
+        s1_counter++;
+        
+        // Decimate 8x down to 24kHz
+        if ((s1_counter & 0x7) == 0) {
+            float out2 = 0.0f;
+            processStage(out1, out2, stage2_coeffs, s2_x, s2_y);
+            s2_counter++;
+            
+            // Decimate another 8x down to 3kHz
+            if ((s2_counter & 0x7) == 0) {
+                output = out2;
+                valid3kHz = true;
+            }
+        }
+    }
+
+private:
+    uint32_t s1_counter = 0;
+    uint32_t s2_counter = 0;
+
+    void processStage(float in, float& out, float* c, float* x, float* y) {
+        out = c[0]*in + c[1]*x[0] + c[2]*x[1] - c[3]*y[0] - c[4]*y[1];
+        x[1] = x[0]; x[0] = in; y[1] = y[0]; y[0] = out;
+    }
+
+    void computeBiquadLPF(float sr, float cutoff, float* c) {
+        float omega = 2.0f * 3.14159265f * cutoff / sr;
+        float alpha = std::sin(omega) / 1.41421356f; // Q = 0.707
+        float cosw = std::cos(omega);
+        float a0 = 1.0f + alpha;
+        c[0] = ((1.0f - cosw) / 2.0f) / a0;
+        c[1] = (1.0f - cosw) / a0;
+        c[2] = ((1.0f - cosw) / 2.0f) / a0;
+        c[3] = (-2.0f * cosw) / a0;
+        c[4] = (1.0f - alpha) / a0;
+    }
+};
+```
+
+### `ESP32P4_AudioProcessor_Core1_PitchTracker.hpp`
+```cpp
+#pragma once
+#include <cmath>
+#include <algorithm>
+#include <cstdint>
+#include <atomic>
+
+class Core1PitchTracker {
+public:
+    static const int DOWN_BUF_SIZE = 256;
+    float trackBuffer[DOWN_BUF_SIZE] = {0.0f};
+    uint32_t writeIdx = 0;
+
+    // Output target phase steps calculated at 192kHz scale
+    void process3kHzSample(float decimatedSample, std::atomic<float>& targetStepP1, std::atomic<float>& targetStepP2) {
+        trackBuffer[writeIdx] = decimatedSample;
+        writeIdx = (writeIdx + 1) % DOWN_BUF_SIZE;
+
+        sampleCounter++;
+        if (sampleCounter >= 32) { // Evaluate pitch every ~10.6ms
+            sampleCounter = 0;
+            runAutocorrelation(targetStepP1, targetStepP2);
+        }
+    }
+
+private:
+    uint32_t sampleCounter = 0;
+
+    void runAutocorrelation(std::atomic<float>& step1, std::atomic<float>& step2) {
+        // Lag windows calculated at 3kHz:
+        // Pass 1: 38Hz (lag 79) to 130Hz (lag 23)
+        // Pass 2: 8Hz (lag 375) to 65Hz (lag 46) -> limited to 256 frame history
+        float maxCorr1 = -1.0f; int bestLag1 = -1;
+        float maxCorr2 = -1.0f; int bestLag2 = -1;
+
+        for (int lag = 23; lag <= 79; ++lag) {
+            float corr = 0.0f;
+            for (int i = 0; i < 128; ++i) {
+                int idx1 = (writeIdx - i - 1 + DOWN_BUF_SIZE) % DOWN_BUF_SIZE;
+                int idx2 = (writeIdx - i - 1 - lag + DOWN_BUF_SIZE) % DOWN_BUF_SIZE;
+                corr += trackBuffer[idx1] * trackBuffer[idx2];
+            }
+            if (corr > maxCorr1) { maxCorr1 = corr; bestLag1 = lag; }
+        }
+
+        if (bestLag1 > 0 && maxCorr1 > 0.01f) {
+            float freq3kHz = 3000.0f / static_cast<float>(bestLag1);
+            float targetFreqP1 = freq3kHz * 0.5f;
+            step1.store((2.0f * 3.14159265f * targetFreqP1) / 192000.0f, std::memory_order_relaxed);
+            
+            // Pass 2 targets derived dynamically from Pass 1 subharmonic results
+            float targetFreqP2 = targetFreqP1 * 0.5f;
+            if (targetFreqP2 >= 8.0f) {
+                step2.store((2.0f * 3.14159265f * targetFreqP2) / 192000.0f, std::memory_order_relaxed);
+            } else { step2.store(0.0f, std::memory_order_relaxed); }
+        } else {
+            step1.store(0.0f, std::memory_order_relaxed);
+            step2.store(0.0f, std::memory_order_relaxed);
+        }
+    }
+};
+```
+
+### `ESP32P4_AudioProcessor_Core1_ASRC.hpp`
+```cpp
+#pragma once
+#include <cmath>
+#include <cstdint>
+
+class Core1ASRC {
+public:
+    // Tracks fractional phase positioning across the 4x upsampling barrier
+    float phaseAccumulator = 0.0f;
+    float lastSampleL = 0.0f;
+    float currentSampleL = 0.0f;
+    float lastSampleR = 0.0f;
+    float currentSampleR = 0.0f;
+
+    // Call this upon every single 48kHz I2S frame transaction read interrupt
+    inline void pushNew48kHzFrame(float newL, float newR) {
+        lastSampleL = currentSampleL;
+        currentSampleL = newL;
+        lastSampleR = currentSampleR;
+        currentSampleR = newR;
+    }
+
+    // Call this 4 times sequentially inside Core 1 per 48kHz hardware frame 
+    // to generate the matching synchronous 192kHz output samples
+    inline void generateNext192kHzFrame(float& outL, float& outR) {
+        // Linearly interpolate between historical and newly arrived capture steps
+        outL = lastSampleL + (currentSampleL - lastSampleL) * phaseAccumulator;
+        outR = lastSampleR + (currentSampleR - lastSampleR) * phaseAccumulator;
+
+        // Advance step positions exactly 4x sample rate scaling factor
+        phaseAccumulator += 0.25f;
+        if (phaseAccumulator >= 1.0f) {
+            phaseAccumulator -= 1.0f;
+        }
+    }
+};
+```
+
+### `ESP32P4_AudioProcessor_Core1_NotificationDucker.hpp`
+```cpp
+#pragma once
+#include <cmath>
+#include <algorithm>
+
+class Core1NotificationDucker {
+public:
+    float envelopeValue = 0.0f;
+    float currentMusicGainScalar = 1.0f;
+
+    // Decay profiles mapped accurately to 192kHz sample blocks
+    const float attackCoef = 1.0f - std::exp(-1.0f / (192000.0f * 0.005f));  // 5ms Attack
+    const float releaseCoef = 1.0f - std::exp(-1.0f / (192000.0f * 0.300f)); // 300ms Release
+
+    inline void processNotificationFrame(float notifL, float notifR, float inputPreGain, float& processedL, float& processedR) {
+        // Multiply by incoming MTR_GAIN_NOTIF from register configuration
+        processedL = notifL * inputPreGain;
+        processedR = notifR * inputPreGain;
+
+        // Peak energy detection for ducking trigger
+        float currentPeakEnergy = std::max(std::fabs(processedL), std::fabs(processedR));
+
+        // Fast-attack, slow-release envelope tracker execution
+        if (currentPeakEnergy > envelopeValue) {
+            envelopeValue += attackCoef * (currentPeakEnergy - envelopeValue);
+        } else {
+            envelopeValue += releaseCoef * (currentPeakEnergy - envelopeValue);
+        }
+
+        // Calculate ducking target attenuation scalar
+        // If envelope exceeds -40 dBFS (0.01 linear), begin dropping background music level
+        if (envelopeValue > 0.01f) {
+            float targetGain = 1.0f - (envelopeValue * 2.5f); // Scale attenuation impact
+            targetGain = std::max(0.10f, targetGain);         // Cap max ducking floor to -20dB
+            currentMusicGainScalar += 0.01f * (targetGain - currentMusicGainScalar);
+        } else {
+            currentMusicGainScalar += 0.001f * (1.0f - currentMusicGainScalar);
+        }
+    }
+};
+```
+
+### `ESP32P4_AudioProcessor_TI_Hardware_Config.hpp`
+```cpp
+#pragma once
+#include <cstdint>
+#include "driver/i2c_master.h"
+
+class TIHardwareConfig {
+public:
+    // Physical hardware converter unique 7-bit addresses
+    static const uint8_t ADC1_ADDR = 0x48; // PCM1822 Primary Pair 1
+    static const uint8_t ADC2_ADDR = 0x49; // PCM1822 Primary Pair 2
+    static const uint8_t DAC1_ADDR = 0x4C; // PCM1795 Master Out Stack 1
+
+    // Write sequence executing over the new ESP-IDF v5.3+ i2c master drivers
+    static esp_err_t writeReg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val) {
+        uint8_t pkt[2] = { reg, val }; //
+        return i2c_master_transmit(dev, pkt, 2, -1); //
+    }
+
+    static esp_err_t configureHardwareConverters(i2c_master_bus_handle_t bus) {
+        i2c_device_config_t dev_cfg = {};
+        dev_cfg.scl_speed_hz = 100000; // 100kHz standard mode
+        
+        i2c_master_dev_handle_t adc1, dac1;
+        
+        dev_cfg.device_address = ADC1_ADDR;
+        if (i2c_master_bus_add_device(bus, &dev_cfg, &adc1) != ESP_OK) return ESP_FAIL;
+        
+        dev_cfg.device_address = DAC1_ADDR;
+        if (i2c_master_bus_add_device(bus, &dev_cfg, &dac1) != ESP_OK) return ESP_FAIL;
+
+        // --- PCM1822 Stereo ADC Boot Configuration Sequence ---
+        // Reg 0x01: Software Reset, auto-clears
+        if (writeReg(adc1, 0x01, 0x01) != ESP_OK) return ESP_FAIL;
+        // Reg 0x14: Set TDM data formatting mode, 32-bit slot width, frame synced
+        if (writeReg(adc1, 0x14, 0x10) != ESP_OK) return ESP_FAIL;
+        // Reg 0x15: Enable Master Clock Audio Tracking lines
+        if (writeReg(adc1, 0x15, 0x01) != ESP_OK) return ESP_FAIL;
+
+        // --- PCM1795 Stereo DAC Boot Configuration Sequence ---
+        // Reg 0x12: System Reset, initialize memory pages
+        if (writeReg(dac1, 0x12, 0x80) != ESP_OK) return ESP_FAIL;
+        // Reg 0x13: Set audio input formatting to 32-bit TDM standard format
+        if (writeReg(dac1, 0x13, 0x03) != ESP_OK) return ESP_FAIL;
+        // Reg 0x14: Enable stacked data line routing configurations
+        if (writeReg(dac1, 0x14, 0x00) != ESP_OK) return ESP_FAIL;
+
+        return ESP_OK;
+    }
+};
+```
+
+### `ESP32P4_AudioProcessor_ESP32P4_TDM_Driver.hpp`
+```cpp
+#pragma once
+#include "driver/i2s_tdm.h"
+#include "driver/gpio.h"
+
+class ESP32P4TDMDriver {
+public:
+    i2s_chan_handle_t tx_handle = nullptr;
+    i2s_chan_handle_t rx_handle = nullptr;
+
+    esp_err_t initTDM16_192kHz() {
+        i2s_chan_config_t chan_cfg = I2S_CHAN_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+        // Bind TDM engine strictly to internal hardware DMA descriptors
+        chan_cfg.dma_desc_num = 8;
+        chan_cfg.dma_frame_num = 128;
+        
+        if (i2s_new_tdm_channel(&chan_cfg, &tx_handle, &rx_handle) != ESP_OK) return ESP_FAIL;
+
+        i2s_tdm_config_t tdm_cfg = {
+            .clk_cfg = {
+                .sample_rate_hz = 192000,
+                .clk_src = I2S_CLK_SRC_APLL, // Use High-Precision Audio PLL
+                .mclk_multiple = I2S_MCLK_MULTIPLE_256
+            },
+            .slot_cfg = {
+                .data_bit_width = I2S_DATA_BIT_WIDTH_32BIT,
+                .slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT,
+                // Stacked 16-slot mask mapping (0xFFFF) for our 10 analog converters
+                .slot_mode = I2S_SLOT_MODE_STEREO,
+                .slot_mask = static_cast<i2s_tdm_slot_mask_t>(0xFFFF),
+                .ws_width = I2S_TDM_WS_WIDTH_BIT,
+                .ws_pol = I2S_TDM_WS_POL_HIGH,
+                .bit_shift = true,
+                .left_align = false,
+                .big_endian = false,
+                .bit_order_msb = true
+            },
+            .gpio_cfg = {
+                .mclk = GPIO_NUM_4,  // Master Clock Line
+                .bclk = GPIO_NUM_5,  // Bit Clock Line
+                .ws   = GPIO_NUM_6,  // Word Select / Frame Sync Line
+                .dout = GPIO_NUM_7,  // TDM-16 Transmit Output Data Lane
+                .din  = GPIO_NUM_8,  // TDM-16 Receive Input Data Lane
+                .invert_flags = { false, false, false, false }
+            }
+        };
+
+        if (i2s_channel_init_tdm_mode(tx_handle, &tdm_cfg) != ESP_OK) return ESP_FAIL;
+        if (i2s_channel_init_tdm_mode(rx_handle, &tdm_cfg) != ESP_OK) return ESP_FAIL;
+        
+        if (i2s_channel_enable(tx_handle) != ESP_OK) return ESP_FAIL;
+        if (i2s_channel_enable(rx_handle) != ESP_OK) return ESP_FAIL;
+        return ESP_OK;
+    }
+};
+```
+
+### `ESP32P4_AudioProcessor_InterCore_BufferExchange.hpp`
+```cpp
+#pragma once
+#include <atomic>
+#include "ESP32P4_AudioProcessor_Core0.hpp"
+
+// Encapsulates all filter and mix matrix configurations for a single state version
+struct CoeffAndRouteData {
+    InfrasonicCoefficients infraConfig;
+    float eqMatrixCoeffs[6][31][5]; // b0, b1, b2, a1, a2 per band per channel
+    float mixRoutingWeights[6][10]; // Gain scalers for the 6x10 matrix
+};
+
+class InterCoreBufferExchange {
+public:
+    void init() {
+        activePointer.store(&buffers[0], std::memory_order_release);
+        writePointer = &buffers[1];
+    }
+
+    // Call this inside the background task loop on Core 1 when calculations finish
+    void commitNewParametersFromCore1(const CoeffAndRouteData& newData) {
+        // Write securely to the off-line background target page scratchpad
+        *writePointer = newData;
+
+        // Perform atomic exchange swap over the control variable pointer barrier
+        CoeffAndRouteData* previouslyActive = activePointer.exchange(writePointer, std::memory_order_acq_rel);
+
+        // Retain the decommissioned buffer memory space to use as the next write target
+        writePointer = previouslyActive;
+    }
+
+    // Call this inside the sample block boundary loop on Core 0
+    inline const CoeffAndRouteData* getActiveCore0Parameters() {
+        return activePointer.load(std::memory_order_acquire);
+    }
+
+private:
+    // Triple buffered scheme architecture (Active, Background Write, and Spare swap space)
+    CoeffAndRouteData buffers[3];
+    std::atomic<CoeffAndRouteData*> activePointer{nullptr};
+    CoeffAndRouteData* writePointer = nullptr;
+};
+```
+
+### `ESP32P4_AudioProcessor_Core1_SPISlave_Parser.hpp`
+```cpp
+#pragma once
+#include <cstdint>
+#include <cstring>
+#include "driver/spi_slave.h"
+#include "driver/gpio.h"
+
+// Explicit 32-bit aligned data packet format definitions
+struct __attribute__((packed, aligned(4))) SPIPacket {
+    uint32_t address;
+    uint32_t data;
+};
+
+class Core1SPISlaveParser {
+public:
+    static const int DMA_CHAN = SPI_DMA_CH_AUTO;
+    SPIPacket rx_buffer = {0};
+    SPIPacket tx_buffer = {0};
+
+    esp_err_t initSlaveDriver() {
+        spi_bus_config_t bus_cfg = {
+            .mosi_io_num = GPIO_NUM_11, .miso_io_num = GPIO_NUM_12,
+            .sclk_io_num = GPIO_NUM_13, .quadwp_io_num = -1, .quadhd_io_num = -1,
+            .max_transfer_sz = sizeof(SPIPacket), .flags = SPICOMMON_BUSFLAG_SLAVE,
+            .intr_flags = 0
+        };
+        spi_slave_interface_config_t slv_cfg = {
+            .spics_io_num = GPIO_NUM_10, .flags = 0, .queue_size = 4,
+            .mode = 0, .post_setup_cb = nullptr, .post_trans_cb = nullptr
+        };
+        if (spi_slave_initialize(SPI2_HOST, &bus_cfg, &slv_cfg, DMA_CHAN) != ESP_OK) return ESP_FAIL;
+        return ESP_OK;
+    }
+
+    void handleIncomingTransaction(CompleteProcessorPayload& controls, class ESP32P4_NVS_Manager& nvs) {
+        spi_slave_transaction_t trans = {
+            .length = sizeof(SPIPacket) * 8, .trans_len = 0,
+            .tx_buffer = &tx_buffer, .rx_buffer = &rx_buffer, .user = nullptr
+        };
+        // Blocking execution halt until the external UI host clocks an SPI frame packet
+        if (spi_slave_transmit(SPI2_HOST, &trans, -1) != ESP_OK) return;
+
+        // Command Switch-Case Addressing Map Parser Engine
+        switch (rx_buffer.address) {
+            case 0x00A0:
+                controls.enableMask0 = rx_buffer.data;
+                nvs.notifyParameterMutation();
+                break;
+            case 0x00A1:
+                controls.enableMask1 = rx_buffer.data;
+                nvs.notifyParameterMutation();
+                break;
+            case 0x00A4:
+                // Pre-gain scaling modification transfer
+                std::memcpy(&nvs.workingPreset.gainSettings[1], &rx_buffer.data, 4);
+                nvs.notifyParameterMutation();
+                break;
+            case 0x00A8:
+                // Transmit requested real-time hardware status metrics back to host
+                tx_buffer.data = controls.systemStatusMask;
+                break;
+            case 0x00C0:
+                // Return inter-stage clip flags, then immediately execute clear-on-read
+                tx_buffer.data = controls.stickyClipFlags;
+                controls.stickyClipFlags = 0;
+                break;
+            case 0x00D0:
+                if (rx_buffer.data == 0x51A151A1) { nvs.forceImmediateFlashSave(); }
+                break;
+            case 0x00D4:
+                tx_buffer.data = nvs.getSPIFlashTimerStatusRegister();
+                break;
+            default:
+                tx_buffer.data = 0xDEADBEEF; // Invalid Address Fault Handshake
+                break;
+        }
+    }
+};
+```
+
 ---
 
 ## 6. Implementation Notes & Verification Rules
