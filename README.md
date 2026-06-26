@@ -166,8 +166,11 @@ struct InfrasonicRuntimeState {
     float phasePass2 = 0.0f;
     float currentPhaseStepP1 = 0.0f;
     float currentPhaseStepP2 = 0.0f;
-    float targetStepP1 = 0.0f;
-    float targetStepP2 = 0.0f;
+    
+    // Core 1 Dynamic Targets passed via safe inter-core atomic flags
+    std::atomic<float> targetStepP1{0.0f};
+    std::atomic<float> targetStepP2{0.0f};
+    
     float p1AnalysisBuffer[PITCH_BUF_SIZE] __attribute__((allocated_into_sram)) = {0.0f};
     float p2AnalysisBuffer[PITCH_BUF_SIZE] __attribute__((allocated_into_sram)) = {0.0f};
     uint32_t p1WriteIndex = 0;
@@ -202,7 +205,9 @@ inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels
     const float rampUpDelta1s = 1.0f / 192000.0f;
     const float userMuteDelta5ms = 1.0f / 960.0f;
     const float adcActivityThreshold = 0.001f;
-    float localPeaks = {0.0f};
+
+    // Fixed Bug 1 & 2: Structural allocation of metric arrays per channel track path
+    float localPeaks[4] = {0.0f, 0.0f, 0.0f, 0.0f}; 
     uint32_t localClipFlags = 0;
     const uint32_t enMask0 = controls.enableMask0;
     const uint32_t enMask1 = controls.enableMask1;
@@ -239,28 +244,16 @@ inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels
         if (controls.userMuteRampGain < targetUserMuteGain) { controls.userMuteRampGain = std::min(targetUserMuteGain, controls.userMuteRampGain + userMuteDelta5ms); }
         else if (controls.userMuteRampGain > targetUserMuteGain) { controls.userMuteRampGain = std::max(targetUserMuteGain, controls.userMuteRampGain - userMuteDelta5ms); }
         float finalGlobalGainMultiplier = controls.currentSystemGain * controls.userMuteRampGain;
-        float sampleL = inputChannels[s]; float sampleR = inputChannels[s];
+        
+        float sampleL = inputChannels[0][s]; 
+        float sampleR = inputChannels[1][s];
 
         if (unlikely((enMask0 & 0x01) != 0)) { /* EQ1 Cascade */ }
         if (unlikely((enMask0 & 0x02) != 0)) { /* EQ2 Cascade */ }
         if (unlikely(std::fabs(sampleL) > 1.0f || std::fabs(sampleR) > 1.0f)) { localClipFlags |= (1 << 0); }
 
         float hpfOutL = sampleL; float hpfOutR = sampleR; float lpfOutL = 0.0f; float lpfOutR = 0.0f;
-        if (unlikely((enMask0 & 0x40) != 0)) {
-            // Execute physical linkwitz-riley or butterworth separation filters when active
-            // hpfOutL = runHighPassFilter(sampleL);
-            // lpfOutL = runLowPassFilter(sampleL);
-            // hpfOutR = runHighPassFilter(sampleR);
-            // lpfOutR = runLowPassFilter(sampleR);
-        } else {
-            // Default Fallback: High-pass output routes raw full-range audio
-            hpfOutL = sampleL;
-            hpfOutR = sampleR;
-            // Explicitly mute the low-pass lines to eliminate hardware hum/thump
-            lpfOutL = 0.0f;
-            lpfOutR = 0.0f;
-}
-
+        if (unlikely((enMask0 & 0x40) != 0)) { /* Active Crossover Override Execution Hook */ }
         if (unlikely(std::fabs(hpfOutL) > 1.0f || std::fabs(lpfOutL) > 1.0f)) { localClipFlags |= (1 << 1); }
 
         if (unlikely((enMask1 & 0x01) != 0)) {
@@ -278,7 +271,9 @@ inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels
             if (currentRms > infraCfg.targetRmsThresholdLinear && currentRms > 0.001f) {
                 float excessGain = infraCfg.targetRmsThresholdLinear / currentRms; infraState.outputGainScale += 0.1f * (excessGain - infraState.outputGainScale);
             } else { infraState.outputGainScale += 0.01f * (1.0f - infraState.outputGainScale); }
-            float localTargetStepP1 = infraState.targetStepP1;
+            
+            // Fixed Bug 3: Safe, non-register-cached thread reads
+            float localTargetStepP1 = infraState.targetStepP1.load(std::memory_order_relaxed);
             infraState.currentPhaseStepP1 += 0.05f * (localTargetStepP1 - infraState.currentPhaseStepP1);
             infraState.phasePass1 += infraState.currentPhaseStepP1;
             if (infraState.phasePass1 >= 6.283185307f) infraState.phasePass1 -= 6.283185307f;
@@ -286,7 +281,9 @@ inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels
             if (localTargetStepP1 > 0.000523f && !isVoiceDetected) { synthSubharmonic = std::sin(infraState.phasePass1) * currentRms * infraState.outputGainScale * 1.414f; }
             infraState.p2AnalysisBuffer[infraState.p2WriteIndex] = synthSubharmonic;
             infraState.p2WriteIndex = (infraState.p2WriteIndex + 1) & PITCH_BUF_MASK;
-            float localTargetStepP2 = infraState.targetStepP2;
+            
+            // Fixed Bug 3: Safe, non-register-cached thread reads
+            float localTargetStepP2 = infraState.targetStepP2.load(std::memory_order_relaxed);
             infraState.currentPhaseStepP2 += 0.02f * (localTargetStepP2 - infraState.currentPhaseStepP2);
             infraState.phasePass2 += infraState.currentPhaseStepP2;
             if (infraState.phasePass2 >= 6.283185307f) infraState.phasePass2 -= 6.283185307f;
@@ -300,20 +297,28 @@ inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels
         }
 
         if (unlikely(std::fabs(hpfOutL) > 1.0f || std::fabs(hpfOutR) > 1.0f)) { localClipFlags |= (1 << 2); }
-        localPeaks = std::max(localPeaks, std::fabs(sampleL)); localPeaks = std::max(localPeaks, std::fabs(sampleR));
-        localPeaks = std::max(localPeaks, std::fabs(hpfOutL)); localPeaks = std::max(localPeaks, std::fabs(hpfOutR));
+        
+        // Fixed Bug 2: True discrete channel index routing mapping preservation
+        localPeaks[0] = std::max(localPeaks[0], std::fabs(hpfOutL)); 
+        localPeaks[1] = std::max(localPeaks[1], std::fabs(hpfOutR));
+        localPeaks[2] = std::max(localPeaks[2], std::fabs(lpfOutL));
+        localPeaks[3] = std::max(localPeaks[3], std::fabs(lpfOutR));
+        
         auto inline_clamp = [](float val) { return std::max(-1.0f, std::min(1.0f, val)); };
-        // Explicit multi-channel array pointer streaming (0 = Primary Left, 1 = Primary Right)
+        
         outputChannels[0][s] = inline_clamp(hpfOutL * finalGlobalGainMultiplier);
         outputChannels[1][s] = inline_clamp(hpfOutR * finalGlobalGainMultiplier);
-
-        // Explicitly route your low-frequency sub-lines to the target TDM slots (e.g., Channels 4 and 5)
         outputChannels[4][s] = inline_clamp(lpfOutL * finalGlobalGainMultiplier);
         outputChannels[5][s] = inline_clamp(lpfOutR * finalGlobalGainMultiplier);
-
     }
 
-    for (int ch = 0; ch < 4; ++ch) { if (localPeaks[ch] > controls.channelPeakOutputs[ch]) { controls.channelPeakOutputs[ch] = localPeaks[ch]; } }
+    // Fixed Bug 1: Safe array loop mapping without scalar overflow vulnerabilities
+    for (int ch = 0; ch < 4; ++ch) { 
+        if (localPeaks[ch] > controls.channelPeakOutputs[ch]) { 
+            controls.channelPeakOutputs[ch] = localPeaks[ch]; 
+        } 
+    }
+    
     controls.stickyClipFlags |= localClipFlags;
     uint32_t statusUpdate = 0;
     if (controls.currentSystemGain * controls.userMuteRampGain == 0.0f) statusUpdate |= (1 << 0);
