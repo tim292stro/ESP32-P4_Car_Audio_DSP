@@ -1,15 +1,53 @@
-# High-Performance Multichannel Embedded Audio DSP Processor
+# Multichannel Embedded Audio DSP Processor
+
+Keep in mind this is a work-in-progress, so until you see a picture in this readme of an actual working thing on a bench, this is all fantasy.
+
 ## Technical Specification & Design Proposal
 
-This document outlines the complete architectural design and implementation specification for a custom, low-latency, hard real-time multi-channel hardware audio processor operating at a high native sample rate.
+Here is where this started.  I have a car, and it has a stereo that the manufacturer installed (factory).  It sucks, but it works.  Most of the issues I have are the inputs and outputs, and what control I have over the audio signal in general.  Becasue this particular manufacturer integrated sound effects for things like dash warning lights and backup sensor distance - I can't totally get rid of this PoS without losing that obviously safety/damage critical functionality.  The factory head rolls off bass that I'll never really practically recover, even with remarkable devices that try this - so I'm going to just replace the head unit's media function and keep the old head unit for the sound effects that the head unit must do.
+
+I have been doing car audio since the mid-1990s, and I've been an audio engineer doing live sound and studio work for decades.  There are functions that historically were done with discreet devices equalizers, multi-way crossovers, bass resotration, but as time and technology has progressed these have increasingly become more integrated and the legacy features are now scarce.  I have personally found that as functions and features have become more and more integrated, the actual funcitons themselves no longer do what was desired, and the Commercial-Off-The-Shelf devices are not capable (and increasingly totally within a walled garden or code).  I tried building this with COTS DSP devices, but I always ran into the "you can't do that", "we don't support that configuration", "you can't change the firmware", "you are a bad person and emails from people like you give me nightmares..." replies.  I give up trying to get what I want from someone who will sell it to me.  Fine.  Challenge accepted, that's the American way, I'll do it myself.
+
+This document outlines the complete architectural design and implementation specification for a custom, low-latency, hard-real-time multi-channel audio processor operating at a high native sample rate, and containing those features **I** deem important to have in a car audio processor.  Some of this concept pulls from now-expired patents, and I'm not an attorney so I'm not even going to try to list those here - as a result, I am not offering this code for sale nor do I recommend that anyone try to do that based on this project.  This was a educational learning experience for me, and I wanted to share it with whomever might find the concept and capabilites useful.
+
+Here's what I need from a new head-unit:
+* 4x realatively high-end balanced inputs for program content (channels split left/right and front/rear)
+* Equalization across all of the input channels, lots of bands... I like 31.
+* As much bass compensation as possible, some infrasonic bass restoration - and I WANNA have a seat shaker for those low-low infrasonics!!
+* Global volume control and mute as close as possible to the outputs, and no clicks or pops!
+* A complicated cross-over matrix that allows me to:
+  + Bi-Amp the 4x door speakers
+  + Have a summed subwoofer channel
+  + Have a low-passed VLF infrasonics output I can send to some seat shakers
+* Must retain the sound effect outputs of the factory head unit, which means program audio needs to "duck" when there is an SFX override.
+* Everything needs to be tunable so that I can - well... tune the processor to the system equipment I have in the vehicle I have.
+
+Just reading that list, if I was going to try to do this with descrete COTS hardware, I could see using:
+* 4x AudioControl EQT 30-band equalizers (only one channel each)
+* Something that does base restoration from roll-off like an AudioControl LCQ-1 Speaker-level to line level converter (see how this already doesn't fit with the line level outputs of the EQTs?)
+* An AudioControl LC1 to recover the speaker-level sound effect output of the factory deck
+* A pair of 1-to-2 line level distribution amps to split the line level L/R pair to the two pairs of program input
+* An audio ducking detector like what you get with a public address system for the SFX input
+* A pair of stereo summing mixers to put the SFX lines into the progame pairs
+* 2x stereo crossovers to split the door speaker and LFE signals
+* 4x 2-way crossovers to split the door speaker otuputs for bi-amping
+* Another summing amplifier with 4x inputs to create a mono-LFE channel
+* Another 2-way cross-over to split the woofer and seat shakers
+* 5x stereo or 10x mono volumen controls that I can control from a single knob (I don't want a knob)
+
+That is a trunk full of conventional gear, and I still want to use my trunk.  And I haven't even talked about amps or power for this yet.  I do mention AudioControl products above, I am not affiliated with nor am I paid to talk about them - that's just what I used to prefer/install, and I have a bunch of their gear still from past installs.  And no, their DSP offerings will not work for this - I tried.
+
+This document is for *JUST* the audio processor portion, not the media player or the controls for the processor a user might interface with, but I think those familair with the process will see that "an ESP32 will easily talk to another ESP32 of a different class over a predefined comon interface protocol" - here, SPI, with a defined register map.  That will come next.
 
 ---
 
 ## 1. System Architecture & Hardware Topology
 
 ### Silicon Platform
-* **Processor**: Espressif ESP32-P4 (Dual-Core RISC-V Architecture running at 340MHz).
-* **Memory Optimization**: Real-time signal pathways and circular buffers are explicitly bound to Internal High-Speed SRAM (`__attribute__((allocated_into_sram))`) to eliminate external memory bus stalls.
+* **Readily Available Performance Processor**: Espressif ESP32-P4 (Dual-Core RISC-V Architecture running at 340MHz).
+  * **Memory Optimization**: Real-time signal pathways and circular buffers are explicitly bound to Internal High-Speed SRAM (`__attribute__((allocated_into_sram))`) to eliminate external memory bus, or related stalls.
+  * All the DSP functions have to fit in the hardware capabilites of the ESP32-P4, this will require tuning algorithms.
+* Common ADC/DAC parts capable of force-feeding the ESP32-P4 with the audio data I need the DSP to consume, and not sound like garbage doing it.  I find TI typically warrants attention here, and so I've focussed on their offerings.  I find that I also don't ned to beg for NDA access to walled off datasheets with TI, so take this as a lesson in supply chains you companies that think your blob of silicon is so special a customer has to order 10Million units before you even answer a URL request... Cheers! ;-P
 
 ### Component Selection & I/O Mapping
 
@@ -35,7 +73,7 @@ graph TD
 
 ## 2. Asymmetric Core Workload Allocation
 
-The ESP32-P4 split-core processing environment isolates real-time audio sample calculations from background communication, translation, and non-volatile maintenance tasks.
+The ESP32-P4 split-core processing environment isolates real-time audio sample calculations from background communication, translation, and non-volatile maintenance tasks.  The core doing the DSP things is going to be working very, very hard, and I'll need to keep an eye on die temperatures to make sure my magic rock keeps its magic smoke inside.
 
 ```mermaid
 graph LR
