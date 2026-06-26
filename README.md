@@ -246,7 +246,21 @@ inline void processCompleteCore0Pipeline(float** outputChannels, int numChannels
         if (unlikely(std::fabs(sampleL) > 1.0f || std::fabs(sampleR) > 1.0f)) { localClipFlags |= (1 << 0); }
 
         float hpfOutL = sampleL; float hpfOutR = sampleR; float lpfOutL = 0.0f; float lpfOutR = 0.0f;
-        if (unlikely((enMask0 & 0x40) != 0)) { /* Active Crossover Route Execution */ }
+        if (unlikely((enMask0 & 0x40) != 0)) {
+            // Execute physical linkwitz-riley or butterworth separation filters when active
+            // hpfOutL = runHighPassFilter(sampleL);
+            // lpfOutL = runLowPassFilter(sampleL);
+            // hpfOutR = runHighPassFilter(sampleR);
+            // lpfOutR = runLowPassFilter(sampleR);
+        } else {
+            // Default Fallback: High-pass output routes raw full-range audio
+            hpfOutL = sampleL;
+            hpfOutR = sampleR;
+            // Explicitly mute the low-pass lines to eliminate hardware hum/thump
+            lpfOutL = 0.0f;
+            lpfOutR = 0.0f;
+}
+
         if (unlikely(std::fabs(hpfOutL) > 1.0f || std::fabs(lpfOutL) > 1.0f)) { localClipFlags |= (1 << 1); }
 
         if (unlikely((enMask1 & 0x01) != 0)) {
