@@ -49,7 +49,7 @@ graph TD
     
     ESP32 -->|192kHz TDM-16 lane| DAC[5x TI PCM1795 Stacked DACs]
     DAC --> IV[TI OPA1637 I/V Stages]
-    IV --> OUT[10x Fully-Differential Outputs]
+    IV --> OUT[10x Fully-Differential Outputs through THAT 1606 line drivers]
     
     style ESP32 fill:#f9f,stroke:#333,stroke-width:2px
 ```
@@ -57,7 +57,7 @@ graph TD
 * **Primary Inputs**: 4x Line-Level XLR connections routed via 2x Texas Instruments Burr-Brown PCM1822 Stereo ADCs operating on a high-speed 192kHz Time-Division Multiplexed (TDM) stream.
 * **Secondary Input**: 2x Speaker-Level Notification feeds captured via 1x TI Burr-Brown PCM1822 Stereo ADC operating on an isolated 48kHz I2S bus topology.
 * **Outputs**: 10x Analog Balanced Line Outputs driven by 5x TI Burr-Brown PCM1795 Stereo DACs, stacked concurrently on a single 192kHz TDM-16 data lane.
-* **Analog Output Stage**: TI OPA1637 Fully-Differential Amplifiers configured as combined active Current-to-Voltage (I/V) converters and low-pass anti-aliasing reconstruction filters.
+* **Analog Output Stage**: TI OPA1637 Fully-Differential Amplifiers configured as combined active Current-to-Voltage (I/V) converters and low-pass anti-aliasing reconstruction filters, feeding THAT Corp 1606 differential line drivers.
 
 ### Silicon Platform
 
