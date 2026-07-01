@@ -11,28 +11,3 @@ project(ESP32P4_Car_Audio_Processor)
 if(NOT "${IDF_TARGET}" STREQUAL "esp32p4")
     message(FATAL_ERROR "Target architecture mismatch! Project requires esp32p4.")
 endif()
-
-# Register project components and source file structures
-idf_component_register(
-    SRCS "main.cpp"
-    INCLUDE_DIRS "."
-    REQUIRES driver nvs_flash esp_log esp_hw_support
-)
-
-# Enforce hardware-accelerated RISC-V single-precision floats
-# and aggressive loops unrolling optimization compilation profiles
-target_compile_options(${COMPONENT_LIB} PRIVATE
-    "-O3"
-    "-march=rv32imafc"
-    "-mabi=ilp32f"
-    "-funroll-loops"
-    "-fomit-frame-pointer"
-    "-ffast-math"
-)
-
-# Pass floating point math extensions directly down into the linker flags
-target_link_options(${COMPONENT_LIB} PRIVATE
-    "-march=rv32imafc"
-    "-mabi=ilp32f"
-    "-Wl,--gc-sections"
-)
