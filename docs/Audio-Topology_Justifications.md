@@ -203,16 +203,16 @@ This is the **dominant noise source** in the pipeline.
 ##### Cascaded Biquad Noise Model
 
 A single biquad filter at unity gain adds round-off noise $\sigma_1$ at its output:
-$$\sigma_1 \approx 2 \times 2^{-24} \times |y[n]|$$
+$\sigma_1 \approx 2 \times 2^{-24} \times |y[n]|$
 
 For $N = 186$ biquads in cascade, assuming partial correlation (not fully independent):
-$$\sigma_N \approx \sqrt{\sum_{i=1}^{N} \sigma_i^2} \approx \sqrt{N} \times \sigma_1$$
+$\sigma_N \approx \sqrt{\sum_{i=1}^{N} \sigma_i^2} \approx \sqrt{N} \times \sigma_1$
 
 With typical output magnitude $|y[n]| \approx 0.3$ (EQ boost of +6 dB = 2.0x, followed by attenuation):
-$$\sigma_{186} \approx \sqrt{186} \times 2 \times 2^{-24} \times 0.3 \approx 13.6 \times 2.4 \times 10^{-7} \approx 3.3 \times 10^{-6}$$
+$\sigma_{186} \approx \sqrt{186} \times 2 \times 2^{-24} \times 0.3 \approx 13.6 \times 2.4 \times 10^{-7} \approx 3.3 \times 10^{-6}$
 
 In dB relative to full-scale (±1.0):
-$$\text{SNR}_{\text{biquads}} = 20 \log_{10}\left(\frac{1.0}{3.3 \times 10^{-6}}\right) \approx 109 \text{ dB}$$
+$\text{SNR}_{\text{biquads}} = 20 \log_{10}\left(\frac{1.0}{3.3 \times 10^{-6}}\right) \approx 109 \text{ dB}$
 
 ##### Sub-Stage Breakdown (Path A)
 
@@ -251,12 +251,12 @@ Core 1 background thread performs 4x upsampling on notification/SFX input using 
 Linear interpolation error is dominated by the Nyquist-frequency alias component (highest-frequency signal in 48 kHz bandwidth):
 
 For a full-scale signal at Nyquist (24 kHz), interpolation introduces a quantization-like error at the interpolated points:
-$$e_{\text{interp}}[n] \approx 2^{-2} \times 2^{-24} \times \text{signal amplitude}$$
+$e_{\text{interp}}[n] \approx 2^{-2} \times 2^{-24} \times \text{signal amplitude}$
 
 This manifests as **approximately +2–3 dB SNR degradation** relative to the original 144 dB.
 
 **Path B Output SNR After ASRC:**
-$$\text{SNR}_{\text{Path B, post-ASRC}} = 144 \text{ dB} - 2.5 \text{ dB} = 141.5 \text{ dB}$$
+$\text{SNR}_{\text{Path B, post-ASRC}} = 144 \text{ dB} - 2.5 \text{ dB} = 141.5 \text{ dB}$
 
 ##### ASRC Justification
 
@@ -312,13 +312,13 @@ After ASRC, SFX signals merge into the main DSP pipeline and traverse the same 1
 **Key Insight:** The SFX path trades ~2–3 dB SNR for the convenience of background ASRC upsampling. Since automotive ambient noise is typically 70–80 dB, both paths maintain perceptually transparent performance.
 
 For a 10 kHz test signal:
-$$e[n] \approx \frac{1}{8} \times (2\pi \times 10k)^2 \times \left(\frac{1}{192k}\right)^2 \approx 1.7 \times 10^{-5}$$
+$e[n] \approx \frac{1}{8} \times (2\pi \times 10k)^2 \times \left(\frac{1}{192k}\right)^2 \approx 1.7 \times 10^{-5}$
 
 In dB SNR:
-$$\text{SNR}_{\text{ASRC}} = 20 \log_{10}\left(\frac{1.0}{1.7 \times 10^{-5}}\right) \approx 95.4 \text{ dB}$$
+$\text{SNR}_{\text{ASRC}} = 20 \log_{10}\left(\frac{1.0}{1.7 \times 10^{-5}}\right) \approx 95.4 \text{ dB}$
 
 **Combined with biquad noise floor (~138 dB):**
-$$\text{SNR}_{\text{post-ASRC}} \approx 10 \log_{10}(10^{13.86} + 10^{9.54}) \approx 138.5 \text{ dB}$$
+$\text{SNR}_{\text{post-ASRC}} \approx 10 \log_{10}(10^{13.86} + 10^{9.54}) \approx 138.5 \text{ dB}$
 
 ASRC contribution: **<0.1 dB loss** (interpolation noise negligible relative to filter cascade).
 
@@ -342,19 +342,19 @@ Six output channels, each summing up to 10 input sources.
 ##### Mixing Noise Model
 
 Each output channel sums $M = 10$ sources at gains $g_i$:
-$$y[n] = \sum_{i=0}^{9} g_i \times x_i[n]$$
+$y[n] = \sum_{i=0}^{9} g_i \times x_i[n]$
 
 Assuming each source has independent round-off noise $\sigma_{\text{source}}$ and typical mixing gains sum to unity ($\sum g_i \approx 1$):
-$$\sigma_{\text{mix}} \approx \sqrt{M} \times \sigma_{\text{source}} \times \sqrt{\sum g_i^2}$$
+$\sigma_{\text{mix}} \approx \sqrt{M} \times \sigma_{\text{source}} \times \sqrt{\sum g_i^2}$
 
 For typical automotive mixing (few channels active at a time, gains well-balanced):
-$$\sigma_{\text{mix}} \approx \sqrt{3} \times \sigma_{\text{source}} \approx 1.73 \times \sigma_{\text{source}}$$
+$\sigma_{\text{mix}} \approx \sqrt{3} \times \sigma_{\text{source}} \approx 1.73 \times \sigma_{\text{source}}$
 
 SNR loss:
-$$\text{SNR}_{\text{loss}} = 20 \log_{10}(1.73) \approx 4.76 \text{ dB}$$
+$\text{SNR}_{\text{loss}} = 20 \log_{10}(1.73) \approx 4.76 \text{ dB}$
 
 However, at typical operating levels (master volume 0.35–0.80), the mixer input magnitudes are reduced:
-$$\sigma_{\text{mix, scaled}} \approx 0.5 \times \sigma_{\text{mix}} \implies \text{SNR}_{\text{loss}} \approx -1.5 \text{ dB}$$
+$\sigma_{\text{mix, scaled}} \approx 0.5 \times \sigma_{\text{mix}} \implies \text{SNR}_{\text{loss}} \approx -1.5 \text{ dB}$
 
 **Practical SNR loss from mixing: ~1–2 dB** (normal mixing levels).
 
@@ -388,7 +388,7 @@ $$\sigma_{\text{mix, scaled}} \approx 0.5 \times \sigma_{\text{mix}} \implies \t
 
 ### 2.3 Cumulative SNR Forecast — Path A (Primary @ 192 kHz, No ASRC)
 
-$$\text{SNR}_{\text{cumulative}} = 10 \log_{10}\left( \sum_i 10^{\text{SNR}_i / 10} \right)$$
+$\text{SNR}_{\text{cumulative}} = 10 \log_{10}\left( \sum_i 10^{\text{SNR}_i / 10} \right)$
 
 | Stage | SNR (dB) | Cumulative SNR (dB) |
 | --- | --- | --- |
@@ -741,7 +741,7 @@ In a controlled lab with <30 dB SPL background, this is audible. In a car at hig
 ### A.2 Cascaded Noise Calculation
 
 For $N$ independent noise sources with SNR values $\text{SNR}_i$:
-$$\text{SNR}_{\text{total}} = 10 \log_{10}\left( \sum_{i=1}^{N} 10^{\text{SNR}_i / 10} \right)$$
+$\text{SNR}_{\text{total}} = 10 \log_{10}\left( \sum_{i=1}^{N} 10^{\text{SNR}_i / 10} \right)$
 
 The dominant term typically wins; cascade SNR ≈ (worst single stage − 3 dB).
 
